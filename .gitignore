@@ -1,0 +1,17 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOS specific file attributes
+._*
+
+# Thumbnail cache files
+Thumbs.db
+ehthumbs.db
+
+# Temporary files
+.Spotlight-V100
+.Trashes
+*.swp
+*.lock
