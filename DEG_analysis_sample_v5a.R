@@ -1,0 +1,1058 @@
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("devtools")    # only if devtools not yet installed
+BiocManager::install("pachterlab/sleuth")
+BiocManager::install("biomaRt")
+BiocManager::install("data.table")
+install.packages("ggplot2")
+install.packages("FactoMineR")
+install.packages("factoextra")
+install.packages("lm.beta")
+
+
+
+library(biomaRt)
+library(rtracklayer)
+library(rhdf5)
+library(sleuth)
+library(dplyr)
+library(ggplot2)
+library(FactoMineR)
+library(factoextra)
+library(ggrepel)
+library(grid)
+library(lm.beta)
+library(data.table)
+
+
+setwd("~/Desktop/all_results")
+
+# Load sample metadata
+sample_info <- read.csv("sample_metadata_full_paths.csv")
+
+# Specify the directory containing the Kallisto output folders
+output_dir <- "/Users/umitakirmak/Desktop/all_results"
+# List all folders within the directory
+folders <- list.files(output_dir, full.names = TRUE)
+
+# Create a data frame from the folder names
+folder_df <- data.frame(
+  sample_id = as.numeric(gsub(".*V([0-9]+).*", "\\1", basename(folders))),  # Extract sample ID from folder name
+  path = folders,
+  stringsAsFactors = FALSE
+)
+sliced_folder_df <- folder_df[10:nrow(folder_df),] #no NAs present
+
+
+# Merge `sample_info` with `folder_df` to assign the correct paths dynamically
+
+colnames(sample_info)[colnames(sample_info) == "sample"] <- "sample_id"  # If necessary
+sample_info <- merge(sample_info, sliced_folder_df, by = "sample_id")
+print(sample_info)
+
+
+
+# Remove the unnecessary `path.x` column and rename `path.y` to `path`
+sample_info <- sample_info %>%
+  select(-path.x) %>%
+  rename(path = path.y)
+print(sample_info)
+
+## Use this file ignore above code:
+write.csv(sample_info, "sample_info_Nov18.csv")
+sample_info <- read.csv("sample_info_Nov18.csv")
+########## Good till this part ! ################
+
+## Dont need to run this code, run once when starting pipeline
+# Set the directory containing your .h5 files
+h5_dir <- "/Users/umitakirmak/Desktop/all_results"
+
+# List all .h5 files in the directory
+h5_files <- list.files(h5_dir, pattern = "\\.h5$", recursive = TRUE, full.names = TRUE)
+
+# Loop through each .h5 file and update the transcript IDs
+for (currentFile in h5_files) {
+  # Read the original transcript IDs
+  old_ids <- h5read(currentFile, "/aux/ids")
+  
+  # Remove any characters following '|' in each ID
+  new_ids <- gsub("\\|.*", "", old_ids)
+  
+  # Write the cleaned IDs back to the .h5 file
+  h5write(new_ids, currentFile, "/aux/ids")
+  
+  # Print the processed file to keep track
+  cat("Updated IDs in file:", currentFile, "\n")
+}
+
+#### END #####
+####  Debugging the match between files:
+cleaned_kallisto_ids <- sub("^transcript:", "", kallisto_ids)
+cleaned_mapping_ids <- sub("\\..*$", "", target_mapping$target_id)
+
+unmatched_kallisto_ids <- cleaned_kallisto_ids[!cleaned_kallisto_ids %in% cleaned_mapping_ids]
+unmatched_mapping_ids <- cleaned_mapping_ids[!cleaned_mapping_ids %in% cleaned_kallisto_ids]
+
+cat("Number of unmatched Kallisto IDs after cleaning:", length(unmatched_kallisto_ids), "\n")
+cat("Number of unmatched target_mapping IDs after cleaning:", length(unmatched_mapping_ids), "\n")
+
+### TARGET MAPPING
+# no need for this code, just load target mapping data, line number 196
+# Path to the GTF file
+gtf_file <- "Homo_sapiens.GRCh37.87.gtf" 
+
+# Import GTF file
+gtf <- import(gtf_file)
+
+# Convert to a data frame and filter for transcripts
+gtf_df <- as.data.frame(gtf)
+
+# Extract relevant columns for transcript-to-gene mapping
+# Selecting rows where type is "transcript" to avoid extraneous rows
+target_mapping <- gtf_df %>%
+  filter(type == "transcript") %>%
+  select(transcript_id = transcript_id, gene_id = gene_id, gene_name = gene_name) %>%
+  distinct()
+
+colnames(target_mapping)[colnames(target_mapping) == "transcript_id"] <- "target_id"
+colnames(target_mapping)
+head(target_mapping)
+
+# Save to CSV for future use
+write.csv(target_mapping, "target_mapping.csv", row.names = FALSE)
+
+#### Target mapping can be retrieved via a file now : target_mapping.csv
+#### Loading Target mapping file
+# Path to the target_mapping CSV file
+target_mapping_path <- "target_mapping.csv" 
+
+# Read the CSV file
+target_mapping <- read.csv(target_mapping_path, stringsAsFactors = FALSE)
+# Check if the data was loaded correctly
+cat("Number of rows in target_mapping:", nrow(target_mapping), "\n")
+cat("Column names in target_mapping:", colnames(target_mapping), "\n")
+head(target_mapping)
+#### END load file
+
+### cleaning file name mismatch
+# changing target_mapping (adding "transcript:" to match the h5 files):
+target_mapping$target_id <- paste0("transcript:", target_mapping$target_id)
+head(target_mapping)
+
+
+# DATA ANALYSIS with SLEUTH
+colnames(sample_info)[colnames(sample_info) == "sample_id"] <- "sample"
+so <- sleuth_prep(sample_info, ~ condition, target_mapping = target_mapping, aggregation_column = "gene_id",
+                  transformation_function = function(x) log2(x + 0.5))
+
+# Fit the models for differential testing
+so <- sleuth_fit(so, ~ condition, 'full')
+so <- sleuth_fit(so, ~ 1, 'reduced')
+#Perform the likelihood ratio test (LRT) to compare full and reduced models
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+# Retrieve the results of the LRT
+dge_results <- sleuth_results(so, 'reduced:full', 'lrt', show_all = TRUE)
+
+
+# Filter significant genes (adjust thresholds as needed)
+significant_genes <- dge_results %>%
+  filter(pval < 0.05)  # using p value
+significant_gene_ids <- significant_genes$target_id
+## 1082 genes
+
+# Save results for review
+write.csv(dge_results, "differential_expression_results.csv", row.names = FALSE)
+
+
+# Extract TPM matrix for PCA
+tpm_matrix <- sleuth_to_matrix(so, 'obs_norm', 'tpm')
+write.csv(tpm_matrix, "1082genes_filtered_tpm.csv")
+
+# only chose transcript and ignore genes
+tpm_matrix <- tpm_matrix[grep("^transcript:", rownames(tpm_matrix)), ]
+rownames(tpm_matrix) <- sub("^transcript:", "", rownames(tpm_matrix))  # Clean rownames
+cat("Number of transcript rows:", nrow(tpm_matrix), "\n")
+head(tpm_matrix)
+
+# Perform PCA on all transcripts/genes
+pca_result <- PCA(t(tpm_matrix), scale.unit = TRUE, graph = FALSE)
+
+# # Visualize PCA -- too many to visualize, takes forever
+fviz_pca_var(
+  pca_result,
+  col.var = "cos2",  # Color by cos2 values to show quality of representation
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),  # Gradient for visualization
+  repel = TRUE,  # Avoid overlapping text
+  title = "PCA - Gene Level"
+)
+
+
+# Calculate variance for each gene, stratified by condition
+gene_variance_by_group <- lapply(unique(sample_info$condition), function(cond) {
+  subset_samples <- sample_info$sample[sample_info$condition == cond]
+  subset_matrix <- tpm_matrix[, subset_samples]
+  apply(subset_matrix, 1, var)  # Variance across genes
+})
+
+# Combine variances across groups
+combined_gene_variance <- do.call(cbind, gene_variance_by_group)
+overall_gene_variance <- rowMeans(combined_gene_variance)
+
+# Select top 624 most varying genes
+top_genes <- names(sort(overall_gene_variance, decreasing = TRUE)[1:624])
+tpm_filtered <- tpm_matrix[top_genes, ]
+nrow(tpm_filtered) #624
+
+
+
+# Perform PCA on the subset of 624 most varying genes
+pca_result_filtered <- PCA(t(tpm_filtered), scale.unit = TRUE, graph = FALSE)
+
+# Use linear regression to adjust for PC1 and PC2
+lm_model <- lm(t(tpm_filtered) ~ pca_result_filtered$ind$coord[, 1:2])
+
+# Residuals from the model represent RNA-Seq data corrected for PC1 and PC2
+adjusted_tpm <- lm_model$residuals + matrixStats::rowMeans2(as.matrix(tpm_filtered))
+head(adjusted_tpm)
+
+# Perform PCA on adjusted TPM
+pca_adjusted <- PCA(t(adjusted_tpm), scale.unit = TRUE, graph = FALSE)
+
+# Visualize PCA
+fviz_pca_var(pca_adjusted,
+             col.ind = as.factor(sample_info$condition),
+             palette = c("#00AFBB", "#E7B800", "#FC4E07"),
+             addEllipses = TRUE,
+             repel = TRUE)
+
+names(pca_adjusted)
+head(pca_adjusted$var$coord)
+
+
+
+
+
+
+# Extract TPM matrix & Save as CSV file
+tpm_matrix <- sleuth_to_matrix(so, 'obs_norm', 'tpm')
+rownames(tpm_matrix) <- sub("^(gene:|transcript:)", "", rownames(tpm_matrix))
+# Check for duplicate rownames
+sum(duplicated(rownames(tpm_matrix)))  # Should return 0
+# Preview the first few rownames to verify
+head(rownames(tpm_matrix))
+write.csv(tpm_matrix, "tpm_matrix_Nov19.csv", row.names = TRUE)
+# Extract normalized count matrix & Save as CSV file
+count_matrix <- sleuth_to_matrix(so, 'obs_norm', 'est_counts')
+write.csv(count_matrix, "normalized_counts_matrix_Nov19.csv", row.names = TRUE)
+
+
+
+# Read the CSV files --- You can IGNORE the above analysis, and just load these files
+tpm_matrix <- read.csv("tpm_matrix_Nov19.csv")
+count_matrix <- read.csv("normalized_counts_matrix_Nov19.csv")
+
+############ Correct up above
+
+
+######## Experimental below #######
+# Calculate variance for each gene
+gene_variance <- apply(tpm_matrix, 1, var)
+top_genes <- names(sort(gene_variance, decreasing = TRUE)[1:624])
+tpm_subset <- tpm_matrix[top_genes, ]
+write.csv(tpm_subset, "tpm_624_genes_Nov18.csv", row.names = TRUE)
+
+
+# Run PCA on the subset of 624 genes
+pca_result <- PCA(t(tpm_subset), scale.unit = TRUE, graph = FALSE)
+
+# Visualize PCA results
+# Calculate contributions to PC1 and PC2
+var_contrib <- pca_result$var$contrib
+head(var_contrib)
+
+summary(var_contrib[, 1])  # PC1 contributions
+summary(var_contrib[, 2])  # PC2 contributions
+
+# Select genes contributing > 0.1 (10%) to PC1 and PC2
+genes_pc1 <- which(var_contrib[, 1] > 0.1)  # Contributions > 10% for PC1
+genes_pc2 <- which(var_contrib[, 2] > 0.1)  # Contributions > 10% for PC2
+selected_genes <- unique(c(genes_pc1, genes_pc2))
+head(selected_genes)
+
+
+head(rownames(var_contrib))
+head(selected_genes)
+
+selected_genes <- rownames(var_contrib)[as.numeric(selected_genes)]
+head(selected_genes)
+
+
+# Visualize PCA with selected genes
+fviz_pca_var(
+  pca_result,
+  col.var = "cos2",
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  select.var = list(name = selected_genes_in_pca),
+  repel = TRUE,
+  title = "PCA - Selected Genes",
+  labelsize = 3
+)
+
+selected_genes_in_pca <- selected_genes[selected_genes %in% rownames(var_contrib)]
+cat("Number of selected genes present in PCA results:", length(selected_genes_in_pca), "\n")
+
+## Visualize top genes:
+# Get top contributors for PC1 and PC2
+top_genes_pc1 <- head(order(var_contrib[, 1], decreasing = TRUE), 20)  # Top 20 for PC1
+top_genes_pc2 <- head(order(var_contrib[, 2], decreasing = TRUE), 20)  # Top 20 for PC2
+
+# Combine the indices of the top genes
+top_genes_indices <- unique(c(top_genes_pc1, top_genes_pc2))
+
+# Extract corresponding gene names
+top_genes <- rownames(var_contrib)[top_genes_indices]
+
+# Create a readable PCA plot with the top contributors
+fviz_pca_var(
+  pca_result,
+  col.var = "cos2",  # Color by quality of representation
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  select.var = list(name = top_genes),  # Select only the top genes
+  repel = TRUE,  # Avoid text overlap
+  title = "PCA - Top Contributing Genes",
+  labelsize = 3  # Adjust label size
+)
+
+# Save the plot
+ggsave("PCA_Top_Contributing_Genes.png", width = 8, height = 6)
+
+
+### Group information.
+# SPLIT the tpm matrix by GROUP
+
+# Identify groups
+groups <- unique(sample_info$condition)
+
+
+
+###### GPT splitting the variance
+# Split TPM matrix by group
+# Ensure `condition` column in `sample_info` contains group information (e.g., "control", "mdd", "mdd_s")
+groups <- unique(sample_info$condition)
+
+# Split the TPM matrix by groups
+tpm_by_group <- lapply(groups, function(group) {
+  samples <- sample_info %>%
+    filter(condition == group) %>%
+    pull(sample)  # Extract sample names for the group
+  tpm_matrix[, samples, drop = FALSE]  # Subset TPM matrix for these samples
+})
+
+names(tpm_by_group) <- groups
+
+
+# Calculate variance for each gene within each group
+variance_by_group <- lapply(tpm_by_group, function(group_data) {
+  apply(group_data, 1, var)  # Variance across rows (genes)
+})
+
+# Combine variances across groups (e.g., average variance across groups)
+combined_variance <- Reduce("+", variance_by_group) / length(variance_by_group)
+
+# Select the top 624 genes with the highest variance
+top_genes_new <- names(sort(combined_variance, decreasing = TRUE)[1:624])
+
+# Subset the TPM matrix to include only these top genes
+tpm_filtered <- tpm_matrix[top_genes, ]
+# Remove the "transcript:" prefix from row names of TPM matrix
+rownames(tpm_filtered) <- sub("^transcript:", "", rownames(tpm_filtered))
+
+
+## PCA on filtered data
+# Transpose data for PCA (genes as rows, samples as columns)
+tpm_for_pca <- t(tpm_filtered)
+head(tpm_by_group)
+
+# Perform PCA
+pca_result <- PCA(tpm_for_pca, scale.unit = TRUE, graph = FALSE)
+
+# Visualize PCA
+fviz_pca_var(pca_result,
+             col.var = "cos2",  # Color by quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)      # Avoid text overlap
+
+# Extract eigenvalues from PCA results
+eigenvalues <- pca_result$eig
+# Print the variance explained by the first two components
+cat("Dim1 variance explained (%):", eigenvalues[1, 2], "\n")
+cat("Dim2 variance explained (%):", eigenvalues[2, 2], "\n")
+
+head(top_genes)  # Display the first few genes in top_genes
+head(rownames(tpm_filtered)) 
+
+
+####### NEW
+top_genes <- top_genes[top_genes %in% rownames(tpm_filtered)]
+cat("Number of top genes found in TPM matrix:", length(top_genes), "\n")
+
+
+
+######### Claude ##########
+# Calculate variance for each gene, stratified by condition
+gene_variance_by_group <- lapply(unique(sample_info$condition), function(cond) {
+  subset_samples <- sample_info$sample[sample_info$condition == cond]
+  subset_matrix <- tpm_matrix[, subset_samples]
+  apply(subset_matrix, 1, var)
+})
+
+# Combine variances across groups (e.g., by taking mean)
+combined_gene_variance <- do.call(cbind, gene_variance_by_group)
+overall_gene_variance <- rowMeans(combined_gene_variance)
+
+# Select top 624 most varying genes
+top_genes <- names(sort(overall_gene_variance, decreasing = TRUE)[1:624])
+tpm_subset <- tpm_matrix[top_genes, ]
+
+# Perform PCA
+pca_result <- PCA(t(tpm_subset), scale = TRUE, graph = FALSE)
+
+# Interesting but wrong:
+p <- fviz_pca_ind(pca_result, 
+                  geom = "point", 
+                  col.ind = sample_info$condition,
+                  palette = c("#1F77B4", "#FF7F0E", "#2CA02C"),  # Professional color palette
+                  addEllipses = TRUE,
+                  ellipse.type = "confidence",
+                  legend.title = "Condition",
+                  title = "PCA of Top 624 Varying Genes") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Correct figure:
+p <- fviz_pca_var(pca_result,
+                       col.var = "cos2",
+                       gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                       repel = TRUE) +
+  geom_text_repel(aes(label = row.names(pca_result$var$coord)), 
+                  size = 3,
+                  segment.color = "grey50",
+                  segment.alpha = 0.5) +
+  geom_segment(aes(x = 0, y = 0, 
+                   xend = pca_result$var$coord[, 1], 
+                   yend = pca_result$var$coord[, 2]),
+               arrow = arrow(length = unit(0.2, "cm")),
+               color = "grey50",
+               alpha = 0.5)
+
+
+# Print or save the plot
+print(p)
+
+
+#### claude v2
+tpm_matrix <- sleuth_to_matrix(so, 'obs_norm', 'tpm')
+
+
+# data cleaning
+# Filter to include only rows starting with "transcript:" and clean rownames
+#tpm_matrix <- tpm_matrix[grep("^transcript:", rownames(tpm_matrix)), ]
+#rownames(tpm_matrix) <- sub("^transcript:", "", rownames(tpm_matrix))  # Remove "transcript:" prefix
+
+# Check the results
+cat("Number of transcript rows:", nrow(tpm_matrix), "\n")
+
+
+# Sleuth results
+# Extract results from Sleuth
+lrt_results <- sleuth_results(so, test = 'reduced:full', test_type = 'lrt', show_all = TRUE)
+# View the structure of the results
+head(lrt_results)
+head(tpm_matrix)
+
+
+# First, let's look at the target_mapping structure
+print("Structure of target_mapping:")
+head(target_mapping)
+
+# Get significant genes from lrt_results
+sig_genes <- lrt_results %>%
+  filter(pval < 0.05) %>%
+  pull(target_id)  # Extract significant gene IDs (ENSG IDs)
+
+# Map significant genes to their corresponding transcripts using target_mapping
+# Assuming they did Transcript level analysis and not the genes
+sig_transcripts <- target_mapping %>%
+  filter(gene_id %in% sig_genes) %>%
+  pull(target_id)  # Extract transcript IDs (ENST IDs)
+head(sig_transcripts)
+
+
+# Now get matching transcripts from TPM matrix
+matching_ids <- sig_transcripts[sig_transcripts %in% rownames(tpm_matrix)]
+
+# Check the numbers
+cat("\nNumber of significant genes:", nrow(sig_genes))
+cat("\nNumber of corresponding transcripts:", length(sig_transcripts))
+cat("\nNumber of matching transcripts in TPM matrix:", length(matching_ids))
+
+# Subset TPM matrix for matched transcripts
+tpm_subset <- tpm_matrix[matching_ids, ]
+head(tpm_subset)
+rownames(tpm_subset) <- sub("^transcript:", "", rownames(tpm_subset))  # Remove "transcript:" prefix
+head(tpm_subset)
+write.csv(tpm_subset, "tpm subset all significant_Nov20.csv")
+
+
+# Proceed with PCA
+pca_result <- PCA(t(tpm_subset), scale = TRUE, graph = FALSE)
+
+
+## conducting without doing this! 
+## below code selects transcripts based on within group variance
+# Calculate variance for each gene, stratified by condition
+gene_variance_by_group <- lapply(unique(sample_info$condition), function(cond) {
+  subset_samples <- sample_info$sample[sample_info$condition == cond]
+  subset_matrix <- tpm_matrix[, subset_samples]
+  apply(subset_matrix, 1, var)  # Variance across genes
+})
+
+# Combine variances across groups
+combined_gene_variance <- do.call(cbind, gene_variance_by_group)
+overall_gene_variance <- rowMeans(combined_gene_variance)
+# Select top 624 most varying genes
+top_genes <- names(sort(overall_gene_variance, decreasing = TRUE)[1:624])
+tpm_filtered <- tpm_matrix[top_genes, ]
+####### END
+
+
+
+### Selecting top 624 based on PCA results --2nd approach
+# Extract the contribution matrix from PCA results
+contrib_matrix <- pca_result$var$contrib
+
+# Compute overall contribution by summing contributions for PC1 and PC2
+# Adjust if you want a different weighting or PCs
+total_contrib <- rowSums(contrib_matrix[, 1:2])
+# Rank transcripts by their contribution to PC1 and PC2
+ranked_transcripts <- names(sort(total_contrib, decreasing = TRUE))
+# Select the top 624 transcripts
+top_transcripts <- ranked_transcripts[1:624]
+# Print the first few selected transcripts for validation
+head(top_transcripts)
+
+# Ensure rownames of tpm_matrix are clean and match transcript IDs
+rownames(tpm_matrix) <- sub("^(gene:|transcript:)", "", rownames(tpm_matrix))
+# Subset TPM matrix for the top transcripts
+tpm_top_624 <- tpm_matrix[top_transcripts, ]
+# Check dimensions to confirm
+cat("Number of rows in subset TPM matrix:", nrow(tpm_top_624), "\n")
+
+# Fit a linear model to adjust for PC1 and PC2
+lm_model <- lm(t(tpm_top_624) ~ pca_result$ind$coord[, 1:2])
+# Extract residuals and add back the row means to retain biological signal
+adjusted_tpm <- lm_model$residuals + matrixStats::rowMeans2(as.matrix(tpm_top_624))
+# Confirm dimensions of adjusted matrix
+cat("Rows in adjusted TPM matrix:", nrow(adjusted_tpm), "\n")
+cat("Columns in adjusted TPM matrix:", ncol(adjusted_tpm), "\n")
+
+# Perform PCA on the adjusted TPM matrix
+pca_adjusted <- PCA(adjusted_tpm, scale.unit = TRUE, graph = FALSE)
+
+# Visualize the PCA results
+fviz_pca_var(pca_adjusted,
+             col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)
+#### END 624 genes
+
+
+#### Start select 99 top transcripts
+
+# Extract contribution matrix for all transcripts
+contrib_matrix <- pca_result$var$contrib
+# Select top 80 transcripts for Dim1
+top_dim1 <- rownames(contrib_matrix)[order(contrib_matrix[, 1], decreasing = TRUE)][1:80]
+# Select top 19 transcripts for Dim2
+top_dim2 <- rownames(contrib_matrix)[order(contrib_matrix[, 2], decreasing = TRUE)][1:19]
+# Combine the two sets of transcripts, ensuring no duplicates
+selected_transcripts <- unique(c(top_dim1, top_dim2))
+# Print to validate
+cat("Number of unique transcripts selected:", length(selected_transcripts), "\n")
+
+rownames(tpm_matrix) <- sub("^(gene:|transcript:)", "", rownames(tpm_matrix))
+tpm_selected <- tpm_matrix[selected_transcripts, ]
+
+# Perform PCA on the filtered TPM matrix
+pca_selected <- PCA(t(tpm_selected), scale.unit = TRUE, graph = FALSE)
+
+
+# Adjust TPM for Dim1 and Dim2 using linear regression
+lm_model <- lm(t(tpm_selected) ~ pca_selected$ind$coord[, 1:2])
+# Adjusted TPM matrix
+adjusted_tpm <- lm_model$residuals + matrixStats::rowMeans2(as.matrix(tpm_selected))
+# Perform PCA on adjusted TPM data
+pca_adjusted <- PCA(adjusted_tpm, scale.unit = TRUE, graph = FALSE)
+
+# Visualize PCA
+fviz_pca_var(pca_adjusted,
+             col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,
+             title = "PCA - Adjusted TPM (Top 80 from Dim1, Top 19 from Dim2)")
+
+
+###3 Selecting the most biologically variable transcripts
+# Assume lrt_results is already available from earlier analysis
+# TPM matrix preparation
+tpm_matrix <- read.csv("tpm_matrix_Nov19.csv", row.names = 1)  # Replace with your TPM file
+rownames(tpm_matrix) <- sub("^(gene:|transcript:)", "", rownames(tpm_matrix))  # Clean row names
+cat("Number of transcripts:", nrow(tpm_matrix), "\n")
+# Filter for transcripts only
+tpm_matrix <- tpm_matrix[grep("^ENST", rownames(tpm_matrix)), ]
+# Log2 transform TPM values
+tpm_matrix <- log2(tpm_matrix + 0.5)
+
+# Ensure sample_info is loaded and matches the TPM matrix columns
+#sample_info <- read.csv("sample_info_Nov18.csv")  # Replace with your sample info file
+# Match TPM matrix columns with sample_info
+colnames(tpm_matrix) <- as.character(sample_info$sample)
+head(tpm_matrix)
+print(sample_info$sample)
+
+# Remove 'X' prefix from column names in tpm_matrix
+colnames(tpm_matrix) <- gsub("^X", "", colnames(tpm_matrix))
+
+
+# Align sample_info rows with tpm_matrix columns
+sample_info <- sample_info[match(colnames(tpm_matrix), sample_info$sample), ]
+
+# Convert both to integers
+colnames(tpm_matrix) <- as.character(colnames(tpm_matrix))
+sample_info$sample <- as.character(sample_info$sample)
+
+
+# Align sample_info to tpm_matrix columns
+sample_info <- sample_info[match(colnames(tpm_matrix), sample_info$sample), ]
+cat("Column names of tpm_matrix:\n")
+print(colnames(tpm_matrix))
+cat("\nsample_info$sample_id:\n")
+print(sample_info$sample)
+
+
+
+### This did not work ###
+# Linear regression adjustment for batch effects
+lm_model <- lm(as.matrix(tpm_matrix) ~ sample_info$condition)
+adjusted_tpm <- lm_model$residuals + matrixStats::rowMeans2(as.matrix(tpm_matrix))
+### This did not work ###
+
+
+
+### Conducting analysis without LM
+# Calculate variance for each transcript
+transcript_variances <- apply(tpm_matrix, 1, var)
+# Select the top 624 transcripts based on variance
+top_transcripts <- names(sort(transcript_variances, decreasing = TRUE)[1:624])
+
+# Subset the adjusted TPM matrix for these top transcripts
+adjusted_tpm_filtered <- tpm_matrix[top_transcripts, ]
+cat("Number of top transcripts selected:", nrow(adjusted_tpm_filtered), "\n")
+
+
+## PCA
+pca_filtered <- PCA(t(adjusted_tpm_filtered), scale.unit = TRUE, graph = FALSE)
+
+# Plot PCA results
+fviz_pca_var(
+  pca_filtered,
+  col.var = "cos2",  # Color by cos2 values
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  repel = TRUE,
+  title = "PCA - Top 624 Transcripts"
+)
+
+### Select the Top 80 from Dim1 and Top 19 from Dim2
+# Contributions to PC1 and PC2
+dim1_contributions <- pca_filtered$var$contrib[, 1]  # Contributions to Dim1
+dim2_contributions <- pca_filtered$var$contrib[, 2]  # Contributions to Dim2
+
+# Select top 80 from Dim1 and top 19 from Dim2
+top_dim1 <- names(sort(dim1_contributions, decreasing = TRUE)[1:80])
+top_dim2 <- names(sort(dim2_contributions, decreasing = TRUE)[1:19])
+
+# Combine unique transcripts
+selected_transcripts <- unique(c(top_dim1, top_dim2))
+
+# Subset adjusted TPM matrix for these transcripts
+adjusted_tpm_selected <- adjusted_tpm_filtered[selected_transcripts, ]
+
+# Re-run PCA for visualization
+pca_selected <- PCA(t(adjusted_tpm_selected), scale.unit = TRUE, graph = FALSE)
+
+#Variance explained by each dimension:
+# Extract variance explained for each dimension
+explained_variance <- pca_selected$eig[, 2]  # Percentage of variance explained
+cumulative_variance <- pca_selected$eig[, 3]  # Cumulative percentage of variance explained
+
+# Print variance explained for the first few dimensions
+cat("Variance explained by the first dimensions:\n")
+head(explained_variance)
+cat("\nCumulative variance explained by the first dimensions:\n")
+head(cumulative_variance)
+
+# Optional: Plot the variance explained
+barplot(
+  explained_variance,
+  main = "Variance Explained by Each Principal Component",
+  xlab = "Principal Components",
+  ylab = "Percentage of Variance",
+  col = "skyblue",
+  names.arg = 1:length(explained_variance),
+  las = 2  # Make x-axis labels vertical
+)
+# Dim1 explains 47.8%, and Dim2 explains 15.1% of the variance.
+# The combined contribution of these two dimensions is 62.9%.
+
+
+### Above works.
+### Correcting for LM 2nd try
+colnames(tpm_matrix)
+sample_info$sample
+
+# Convert condition to numeric/factor if needed
+sample_info$condition <- factor(sample_info$condition)
+
+# Run regression for each row of the matrix
+correct_tpm_matrix <- t(apply(tpm_matrix, 1, function(row) {
+  lm_model <- lm(row ~ sample_info$condition)
+  residuals(lm_model)
+}))
+
+# Ensure the dimensions match the original matrix
+dim(correct_tpm_matrix)
+
+## Nov 20
+## Start conducting the same PCA analysis on the corrected matrix
+# Calculate variance for each transcript
+transcript_variances <- apply(correct_tpm_matrix, 1, var)
+# Select the top 1000 transcripts based on variance
+top_transcripts <- names(sort(transcript_variances, decreasing = TRUE)[1:1000])
+
+# Subset the adjusted TPM matrix for these top transcripts
+adjusted_tpm_filtered <- correct_tpm_matrix[top_transcripts, ]
+cat("Number of top transcripts selected:", nrow(adjusted_tpm_filtered), "\n")
+
+#writing these files:
+# File path where you want to save the data
+output_file <- "top_1000_transcripts_adjusted_tpm.csv"
+write.csv(adjusted_tpm_filtered, file = output_file, row.names = TRUE)
+
+
+
+
+## PCA -- Correct use this one
+pca_filtered <- PCA(t(adjusted_tpm_filtered), scale.unit = TRUE, graph = FALSE)
+
+#Variance explained by each dimension:
+# Extract variance explained for each dimension
+explained_variance <- pca_filtered$eig[, 2]  # Percentage of variance explained
+cumulative_variance <- pca_filtered$eig[, 3]  # Cumulative percentage of variance explained
+
+# Print variance explained for the first few dimensions
+cat("Variance explained by the first dimensions:\n")
+head(explained_variance) 
+cat("\nCumulative variance explained by the first dimensions:\n")
+head(cumulative_variance)
+#22.46 dim1, 7.51 dim2
+
+# Plot PCA results --- too many dont graph it
+fviz_pca_var(
+  pca_filtered,
+  col.var = "cos2",  # Color by cos2 values
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  repel = TRUE,
+  title = "PCA - Top 1000 Transcripts"
+)
+
+
+### Select the Top  from Dim1 and Top  from Dim2
+# Contributions to PC1 and PC2
+dim1_contributions <- pca_filtered$var$contrib[, 1]  # Contributions to Dim1
+dim2_contributions <- pca_filtered$var$contrib[, 2]  # Contributions to Dim2
+
+# Select top 80 from Dim1 and top 26 from Dim2
+top_dim1 <- names(sort(dim1_contributions, decreasing = TRUE)[1:80])
+top_dim2 <- names(sort(dim2_contributions, decreasing = TRUE)[1:26])
+
+# Combine unique transcripts
+selected_transcripts <- unique(c(top_dim1, top_dim2))
+
+# Subset adjusted TPM matrix for these transcripts
+adjusted_tpm_selected <- adjusted_tpm_filtered[selected_transcripts, ]
+nrow(adjusted_tpm_selected)
+write.csv(adjusted_tpm_selected, "transcripts_126.csv")
+
+
+# Re-run PCA for visualization
+pca_selected <- PCA(t(adjusted_tpm_selected), scale.unit = TRUE, graph = FALSE)
+
+# Visualize the selected PCA
+fviz_pca_var(
+  pca_selected,
+  col.var = "cos2",
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  repel = TRUE,
+  title = "PCA - Adjusted TPM (Top 80 from Dim1, Top 26 from Dim2)"
+)
+
+# Different style figure
+
+fviz_pca_var(
+  pca_selected,
+  col.var = "black",  # Set variable color to black
+  gradient.cols = NULL,  # Disable gradient colors
+  repel = TRUE,  # Avoid overlapping text labels
+  labelsize = 2,  # Further reduce label size for ENST/transcripts
+  title = "PCA - Adjusted TPM (Top 80 from Dim1, Top 26 from Dim2)"
+) +
+  theme_minimal() +  # Use a minimal black-and-white theme
+  theme(
+    text = element_text(size = 10),  # Adjust overall text size
+    plot.title = element_text(hjust = 0.5, face = "bold"),  # Center and bold the title
+    axis.text = element_text(size = 8),  # Smaller axis labels
+    legend.position = "none"  # Remove legend for simplicity
+  )
+
+
+## End of analysis
+
+
+
+
+
+
+
+
+
+# Perform PCA on the subset of 624 most varying genes
+pca_result_filtered <- PCA(t(tpm_filtered), scale.unit = TRUE, graph = FALSE)
+
+# Use linear regression to adjust for PC1 and PC2
+lm_model <- lm(t(tpm_filtered) ~ pca_result_filtered$ind$coord[, 1:2])
+
+# Residuals from the model represent RNA-Seq data corrected for PC1 and PC2
+adjusted_tpm <- lm_model$residuals + matrixStats::rowMeans2(as.matrix(tpm_filtered))
+transposed_tpm <- t(adjusted_tpm)
+rownames(transposed_tpm) <- sub("^(gene:|transcript:)", "", rownames(transposed_tpm))
+head(transposed_tpm)
+
+# Perform PCA on adjusted TPM
+pca_adjusted <- PCA(t(transposed_tpm), scale.unit = TRUE, graph = FALSE)
+
+
+# Visualize PCA --- too crowded
+fviz_pca_var(pca_adjusted,
+             col.ind = as.factor(sample_info$condition),
+             palette = c("#00AFBB", "#E7B800", "#FC4E07"),
+             addEllipses = TRUE,
+             repel = TRUE)
+
+## chosing 99 
+# Perform PCA on adjusted_tpm
+pca_result <- PCA(t(transposed_tpm), scale.unit = TRUE, graph = FALSE)
+
+# Extract variable contributions for Dim1 and Dim2
+contrib_dim1 <- abs(pca_result$var$coord[, 1])  # Contributions to Dim1
+contrib_dim2 <- abs(pca_result$var$coord[, 2])  # Contributions to Dim2
+
+# Order contributions for Dim1 and Dim2
+top_dim1 <- order(contrib_dim1, decreasing = TRUE)[1:80]  # Top 80 for Dim1
+top_dim2 <- order(contrib_dim2, decreasing = TRUE)[1:19]  # Top 19 for Dim2
+
+# Combine indices and ensure unique transcripts
+top_transcripts <- unique(c(top_dim1, top_dim2))
+
+# Extract row names (transcript IDs) of the top 99 transcripts
+selected_transcripts <- rownames(pca_result$var$coord)[top_transcripts]
+
+# Subset adjusted_tpm for the selected top transcripts
+tpm_subset <- transposed_tpm[selected_transcripts, ]
+
+# Verify dimensions
+cat("Dimensions of tpm_subset:", dim(tpm_subset), "\n")
+
+# Perform PCA again on the selected transcripts
+pca_selected <- PCA(t(tpm_subset), scale.unit = TRUE, graph = FALSE)
+
+# Visualize the variables (transcripts) on PCA
+fviz_pca_var(
+  pca_selected,
+  col.var = "contrib",  # Color by contribution
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  repel = TRUE          # Avoid overlapping text
+) +
+  ggtitle("PCA - Top 99 Transcripts (80 from Dim1, 19 from Dim2)")
+
+
+
+
+
+
+
+# Subset TPM matrix for significant transcripts
+deg_tpm <- tpm_matrix[sig_transcripts$target_id, ]
+
+# Perform PCA on significant transcripts
+pca_result <- PCA(t(deg_tpm), scale = TRUE, graph = FALSE)
+
+pca_result <- PCA(t(tpm_matrix), scale = TRUE, graph = FALSE)
+
+
+### Debugging
+cat("Number of unique IDs in lrt_results:", length(unique(lrt_results$target_id)), "\n")
+cat("Number of unique rownames in tpm_matrix:", length(unique(rownames(tpm_matrix))), "\n")
+
+
+## End debugging
+
+
+
+
+
+
+
+######## GPT ######
+# Perform the likelihood ratio test (LRT) to compare full vs. reduced models
+so <- sleuth_fit(so, ~ condition, 'full')
+so <- sleuth_fit(so, ~ 1, 'reduced')
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+
+# Extract results
+sleuth_results <- sleuth_results(so, 'reduced:full', 'lrt', show_all = FALSE)
+
+
+
+
+### Different pipeline ### Does not work
+
+# Load clinical metadata
+sample_metadata <- fread("sample_metadata_full_paths.csv")
+rownames(sample_metadata) <- sample_metadata$sample
+sample_metadata$condition <- as.factor(sample_metadata$condition)
+sample_metadata$condition <- relevel(sample_metadata$condition, ref = "control")  # Set "control" as reference
+
+# Load transcript-to-gene mapping data from GTF
+gtf_file <- "Homo_sapiens.GRCh37.87.gtf"
+gtf_data <- rtracklayer::import(gtf_file)
+gtf_df <- as.data.frame(gtf_data)
+
+# Create t2g mapping
+t2g <- gtf_df %>%
+  filter(type == "transcript") %>%
+  select(target_id = transcript_id, ens_gene = gene_id, ext_gene = gene_name) %>%
+  distinct()
+
+# Check t2g
+head(t2g)
+
+# Specify the directory containing the Kallisto output folders
+output_dir <- "/Users/umitakirmak/Desktop/all_results"
+
+# List all folders within the directory
+folders <- list.files(output_dir, full.names = TRUE)
+
+# Create a data frame from the folder names
+folder_df <- data.frame(
+  sample_id = as.numeric(gsub(".*V([0-9]+).*", "\\1", basename(folders))),  # Extract sample ID from folder name
+  path = folders,
+  stringsAsFactors = FALSE
+)
+
+# Slice the folder data frame (if needed, to remove certain rows or NAs)
+sliced_folder_df <- folder_df[10:nrow(folder_df), ]  # Adjust slicing as needed
+
+# Merge `sample_info` with `folder_df` to assign the correct paths dynamically
+colnames(sample_info)[colnames(sample_info) == "sample"] <- "sample_id"  # Rename column for merging
+sample_info <- merge(sample_info, sliced_folder_df, by = "sample_id")
+
+# Remove unnecessary columns and rename for clarity
+sample_info <- sample_info %>%
+  select(-path.x) %>%
+  rename(path = path.y)
+
+# Validate the structure of `sample_info`
+print(sample_info)
+
+# Prepare the sample-to-covariates data frame (s2c) required for Sleuth
+s2c <- data.frame(
+  sample = sample_info$sample_id,  # Ensure this matches Sleuth's expected format
+  condition = sample_info$condition,
+  path = sample_info$path,
+  stringsAsFactors = FALSE
+)
+
+# Validate the `s2c` structure and check paths
+print(head(s2c))
+
+# Check if all paths exist
+all_exist <- all(file.exists(s2c$path))
+if (!all_exist) {
+  missing_files <- s2c$path[!file.exists(s2c$path)]
+  cat("Missing files:\n", paste(missing_files, collapse = "\n"), "\n")
+} else {
+  cat("All paths are valid.\n")
+}
+
+
+# Standardize row names in tpm_matrix
+rownames(tpm_matrix) <- sub("^(gene:|transcript:)", "", rownames(tpm_matrix))
+
+# Check consistency between tpm_matrix and target_mapping
+mismatched_ids <- setdiff(rownames(tpm_matrix), t2g$target_id)
+
+if (length(mismatched_ids) > 0) {
+  cat("Mismatched IDs between TPM matrix and target mapping:\n")
+  print(head(mismatched_ids))
+} else {
+  cat("All TPM matrix IDs match target mapping.\n")
+}
+
+# Remove prefixes and version numbers from rownames and target mapping
+rownames(tpm_matrix) <- sub("^(gene:|transcript:)", "", rownames(tpm_matrix))
+t2g$target_id <- sub("\\..*$", "", t2g$target_id)
+
+# Check overlap between tpm_matrix and target mapping
+mismatched_ids <- setdiff(rownames(tpm_matrix), t2g$target_id)
+cat("Number of mismatched IDs:", length(mismatched_ids), "\n")
+
+# Subset tpm_matrix to include only matching IDs
+tpm_matrix <- tpm_matrix[rownames(tpm_matrix) %in% t2g$target_id, ]
+
+# Confirm that all IDs now match
+matched_ids <- intersect(rownames(tpm_matrix), t2g$target_id)
+cat("Number of matched IDs:", length(matched_ids), "\n")
+
+
+
+# Proceed to Sleuth preparation step
+so <- sleuth_prep(s2c, ~ condition,
+                  target_mapping = t2g,
+                  aggregation_column = "ens_gene",
+                  gene_mode = TRUE,
+                  extra_bootstrap_summary = TRUE,
+                  read_bootstrap_tpm = TRUE,
+                  transformation_function = function(x) log2(x + 0.5))
+
+
+# Fit full and reduced models
+so <- sleuth_fit(so, ~ condition, 'full')
+so <- sleuth_fit(so, ~ 1, 'reduced')
+
+# Perform likelihood ratio test (LRT)
+so <- sleuth_lrt(so, 'reduced', 'full')
+
+
