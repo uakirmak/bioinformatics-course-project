@@ -783,9 +783,9 @@ fviz_pca_var(
 dim1_contributions <- pca_filtered$var$contrib[, 1]  # Contributions to Dim1
 dim2_contributions <- pca_filtered$var$contrib[, 2]  # Contributions to Dim2
 
-# Select top 80 from Dim1 and top 26 from Dim2
+# Select top 80 from Dim1 and top 19 from Dim2
 top_dim1 <- names(sort(dim1_contributions, decreasing = TRUE)[1:80])
-top_dim2 <- names(sort(dim2_contributions, decreasing = TRUE)[1:26])
+top_dim2 <- names(sort(dim2_contributions, decreasing = TRUE)[1:19])
 
 # Combine unique transcripts
 selected_transcripts <- unique(c(top_dim1, top_dim2))
@@ -793,7 +793,7 @@ selected_transcripts <- unique(c(top_dim1, top_dim2))
 # Subset adjusted TPM matrix for these transcripts
 adjusted_tpm_selected <- adjusted_tpm_filtered[selected_transcripts, ]
 nrow(adjusted_tpm_selected)
-write.csv(adjusted_tpm_selected, "transcripts_126.csv")
+write.csv(adjusted_tpm_selected, "transcripts_99.csv")
 
 
 # Re-run PCA for visualization
@@ -805,7 +805,7 @@ fviz_pca_var(
   col.var = "cos2",
   gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
   repel = TRUE,
-  title = "PCA - Adjusted TPM (Top 80 from Dim1, Top 26 from Dim2)"
+  title = "PCA - Variables"
 )
 
 # Different style figure
@@ -816,7 +816,7 @@ fviz_pca_var(
   gradient.cols = NULL,  # Disable gradient colors
   repel = TRUE,  # Avoid overlapping text labels
   labelsize = 2,  # Further reduce label size for ENST/transcripts
-  title = "PCA - Adjusted TPM (Top 80 from Dim1, Top 26 from Dim2)"
+  title = "PCA - Variables"
 ) +
   theme_minimal() +  # Use a minimal black-and-white theme
   theme(
