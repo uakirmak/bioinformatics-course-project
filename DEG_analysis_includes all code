@@ -122,7 +122,7 @@ head(target_mapping)
 # Save to CSV for future use
 write.csv(target_mapping, "target_mapping.csv", row.names = FALSE)
 
-#### Target mapping can be retrieved via a file now : target_mapping.csv
+#### Target mapping can be retrieved via a file now: target_mapping.csv
 #### Loading Target mapping file
 # Path to the target_mapping CSV file
 target_mapping_path <- "target_mapping.csv" 
@@ -400,7 +400,7 @@ cat("Number of top genes found in TPM matrix:", length(top_genes), "\n")
 
 
 
-######### Claude ##########
+######### Debug with the help of Claude ##########
 # Calculate variance for each gene, stratified by condition
 gene_variance_by_group <- lapply(unique(sample_info$condition), function(cond) {
   subset_samples <- sample_info$sample[sample_info$condition == cond]
@@ -452,7 +452,8 @@ p <- fviz_pca_var(pca_result,
 print(p)
 
 
-#### claude v2
+#### above did not work. Debug v2
+
 tpm_matrix <- sleuth_to_matrix(so, 'obs_norm', 'tpm')
 
 
@@ -529,7 +530,7 @@ tpm_filtered <- tpm_matrix[top_genes, ]
 
 
 
-### Selecting top 624 based on PCA results --2nd approach
+### Selecting top 624 based on PCA results --3rd approach
 # Extract the contribution matrix from PCA results
 contrib_matrix <- pca_result$var$contrib
 
@@ -569,7 +570,7 @@ fviz_pca_var(pca_adjusted,
 #### END 624 genes
 
 
-#### Start select 99 top transcripts
+#### select 99 top transcripts
 
 # Extract contribution matrix for all transcripts
 contrib_matrix <- pca_result$var$contrib
@@ -616,7 +617,7 @@ tpm_matrix <- tpm_matrix[grep("^ENST", rownames(tpm_matrix)), ]
 tpm_matrix <- log2(tpm_matrix + 0.5)
 
 # Ensure sample_info is loaded and matches the TPM matrix columns
-#sample_info <- read.csv("sample_info_Nov18.csv")  # Replace with your sample info file
+sample_info <- read.csv("sample_info_Nov18.csv") 
 # Match TPM matrix columns with sample_info
 colnames(tpm_matrix) <- as.character(sample_info$sample)
 head(tpm_matrix)
@@ -703,7 +704,7 @@ head(explained_variance)
 cat("\nCumulative variance explained by the first dimensions:\n")
 head(cumulative_variance)
 
-# Optional: Plot the variance explained
+# Plot the variance explained
 barplot(
   explained_variance,
   main = "Variance Explained by Each Principal Component",
@@ -731,11 +732,11 @@ correct_tpm_matrix <- t(apply(tpm_matrix, 1, function(row) {
   residuals(lm_model)
 }))
 
-# Ensure the dimensions match the original matrix
+# check the dimensions match the original matrix
 dim(correct_tpm_matrix)
 
 ## Nov 20
-## Start conducting the same PCA analysis on the corrected matrix
+## conducting the same PCA analysis on the corrected matrix
 # Calculate variance for each transcript
 transcript_variances <- apply(correct_tpm_matrix, 1, var)
 # Select the top 1000 transcripts based on variance
@@ -753,7 +754,7 @@ write.csv(adjusted_tpm_filtered, file = output_file, row.names = TRUE)
 
 
 
-## PCA -- Correct use this one
+## PCA -- Correct use this one --
 pca_filtered <- PCA(t(adjusted_tpm_filtered), scale.unit = TRUE, graph = FALSE)
 
 #Variance explained by each dimension:
@@ -924,7 +925,7 @@ cat("Number of unique rownames in tpm_matrix:", length(unique(rownames(tpm_matri
 
 
 
-######## GPT ######
+######## Debug using GPT ######
 # Perform the likelihood ratio test (LRT) to compare full vs. reduced models
 so <- sleuth_fit(so, ~ condition, 'full')
 so <- sleuth_fit(so, ~ 1, 'reduced')
