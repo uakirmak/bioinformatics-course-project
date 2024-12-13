@@ -21,10 +21,11 @@ Replicated flow
 
 - DGE and PCE
 
-    In analysis folder, file ....r is for apply DGE and PCA to generate most significant transcripts from .h5 abundance files
+    In PCA_DGE_analysis folder, it contains R files for applying DGE and PCA to generate most significant transcripts from .h5 abundance files
 
 - ML Analysis 
-    In analysis folder
+    
+    In ML_analysis folder
 
     log2_transformed_1197_raw_transcripts.csv: 1197 raw transcripts
 
