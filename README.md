@@ -2,14 +2,16 @@ This is a work that replicated paper "Machine learning model for predicting Majo
 
 This repo includes a paper, a poster and working folders.
 
-Replicated flow: 
-- Prepare data & tools:
+Replicated flow 
+- Prepare data & tools
   
-  Download Homo_sapiens.GRCh37.dna.primary_assembly.fa and Homo_sapiens.GRCh37.87.gff3 https://ftp.ensembl.org/pub/grch37/release-104/
+  Download Homo_sapiens.GRCh37.dna.primary_assembly.fa and Homo_sapiens.GRCh37.87.gff3: https://ftp.ensembl.org/pub/grch37/release-104/
  
-  Install NCBI download tool  https://github.com/ncbi/sra-tools
+  Install NCBI download tool:  https://github.com/ncbi/sra-tools
 
-- Quantification:
+  Download project data from NIH BioSample: https://www.ncbi.nlm.nih.gov/biosample?LinkName=bioproject_biosample_all&from_uid=394722
+
+- Quantification
 
     files: contains all 59 sample for doing classification of CON / MDD / MDD-S
 
@@ -17,12 +19,12 @@ Replicated flow:
 
     It will generate an estimate gene expression level for each sample (.h5 files)
 
-- DGE and PCE:
+- DGE and PCE
 
     In analysis folder, file ....r is for apply DGE and PCA to generate most significant transcripts from .h5 abundance files
 
-- ML Analysis: 
-    In analysis folder:
+- ML Analysis 
+    In analysis folder
 
     log2_transformed_1197_raw_transcripts.csv: 1197 raw transcripts
 
